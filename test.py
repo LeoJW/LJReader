@@ -1,11 +1,20 @@
 import sys
 import numpy as np
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QLabel
 from PyQt6.QtCore import QTimer
 from labjack import ljm
 import pyqtgraph as pg
 from collections import deque
 from datetime import datetime
+
+traceColors = [
+    '#ffffff', '#ebac23', 
+    '#b80058', '#008cf9',
+    '#006e00', '#00bbad',
+    '#d163e6', '#b24502',
+    '#ff9287', '#5954d6',
+    '#00c6f8', '#878500'
+] # 12 color palette from http://tsitsul.in/blog/coloropt/
 
 class LabJackStreamer(QMainWindow):
     def __init__(self):
@@ -13,32 +22,47 @@ class LabJackStreamer(QMainWindow):
         
         # LabJack configuration
         self.handle = None
-        self.scan_rate = 1000  # Hz
+        self.scan_rate = 10000  # Hz (10 kHz - 30 kHz)
         self.num_channels = 2
         self.channels = ["AIN0", "AIN1"]
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
         
         # Buffer configuration
-        self.plot_buffer_size = 5000  # points to display
-        self.read_interval = 100  # ms - how often to read from stream
+        self.plot_buffer_size = 5000  # points to display per channel
+        self.read_interval = 50  # ms - read from stream every 50ms
+        self.plot_update_interval = 100  # ms - update plot less frequently
+        self.plot_downsample = 4  # Plot every Nth point for performance
         
         # Data storage
         self.plot_buffers = [deque(maxlen=self.plot_buffer_size) for _ in range(self.num_channels)]
-        self.file_handle = None
+        self.binary_file = None
+        self.metadata_file = None
+        self.total_samples_written = 0
+        self.start_time = None
         
-        # Timer for reading data
+        # Separate timer for plot updates
         self.read_timer = QTimer()
         self.read_timer.timeout.connect(self.read_stream_data)
+        
+        self.plot_timer = QTimer()
+        self.plot_timer.timeout.connect(self.update_plots)
+        
+        # Performance tracking
+        self.samples_received = 0
+        self.last_perf_update = None
         
         self.init_ui()
         
     def init_ui(self):
-        self.setWindowTitle("LabJack Data Streamer")
+        self.setWindowTitle("LabJack High-Speed Data Streamer")
         
-        # Create central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
         
         # Create plot widget
         self.plot_widget = pg.PlotWidget()
@@ -48,9 +72,8 @@ class LabJackStreamer(QMainWindow):
         
         # Create plot curves for each channel
         self.curves = []
-        colors = ['r', 'g', 'b', 'y']
         for i, ch in enumerate(self.channels):
-            curve = self.plot_widget.plot(pen=colors[i], name=ch)
+            curve = self.plot_widget.plot(pen=traceColors[i % len(traceColors)], name=ch)
             self.curves.append(curve)
         
         layout.addWidget(self.plot_widget)
@@ -70,16 +93,32 @@ class LabJackStreamer(QMainWindow):
             # Open LabJack
             self.handle = ljm.openS("ANY", "ANY", "ANY")
             
-            # Open file for data storage
+            # Create binary file for data storage
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.file_handle = open(f"labjack_data_{timestamp}.csv", 'w')
+            binary_filename = f"labjack_data_{timestamp}.bin"
+            metadata_filename = f"labjack_data_{timestamp}.meta"
             
-            # Write header
-            header = "timestamp," + ",".join(self.channels) + "\n"
-            self.file_handle.write(header)
+            self.binary_file = open(binary_filename, 'wb')
+            self.metadata_file = open(metadata_filename, 'w')
+            
+            # Write metadata
+            self.start_time = datetime.now()
+            metadata = f"""LabJack Data Stream
+Start Time: {self.start_time.isoformat()}
+Sample Rate: {self.scan_rate} Hz
+Number of Channels: {self.num_channels}
+Channels: {', '.join(self.channels)}
+Data Format: Binary float64 (8 bytes per value)
+Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ...]
+"""
+            self.metadata_file.write(metadata)
+            self.metadata_file.flush()
             
             # Configure and start stream
             scans_per_read = int(self.scan_rate * self.read_interval / 1000)
+            
+            # Ensure scans_per_read is reasonable
+            scans_per_read = max(scans_per_read, 1)
             
             ljm.eStreamStart(
                 self.handle,
@@ -91,16 +130,26 @@ class LabJackStreamer(QMainWindow):
             
             print(f"Stream started at {self.scan_rate} Hz")
             print(f"Reading {scans_per_read} scans every {self.read_interval} ms")
+            print(f"Binary file: {binary_filename}")
             
-            # Start the timer to read data
+            # Reset counters
+            self.total_samples_written = 0
+            self.samples_received = 0
+            self.last_perf_update = datetime.now()
+            
+            # Start the timers
             self.read_timer.start(self.read_interval)
+            self.plot_timer.start(self.plot_update_interval)
             
             # Update button states
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             
+            self.status_label.setText(f"Streaming at {self.scan_rate} Hz...")
+            
         except Exception as e:
             print(f"Error starting stream: {e}")
+            self.status_label.setText(f"Error: {e}")
             self.cleanup_stream()
     
     def read_stream_data(self):
@@ -108,30 +157,44 @@ class LabJackStreamer(QMainWindow):
         try:
             # Read data from stream buffer
             ret = ljm.eStreamRead(self.handle)
-            data = ret[0]  # This is a flat list of all channel data
+            data = ret[0]  # Flat list of all channel data
             
-            # Reshape data: data comes as [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ...]
+            if len(data) == 0:
+                return
+            
+            # Convert to numpy array and write directly to binary file
+            # Data is already interleaved: [ch0, ch1, ch0, ch1, ...]
+            data_array = np.array(data, dtype=np.float64)
+            data_array.tofile(self.binary_file)
+            
+            # Track samples
             num_samples = len(data) // self.num_channels
+            self.total_samples_written += num_samples
+            self.samples_received += num_samples
             
-            # Process each scan (set of samples across all channels)
-            for i in range(num_samples):
-                timestamp = datetime.now().timestamp()
-                
-                # Extract values for this scan
-                scan_values = []
+            # Add to plot buffers (downsample for efficiency)
+            for i in range(0, len(data), self.num_channels * self.plot_downsample):
                 for ch_idx in range(self.num_channels):
-                    value = data[i * self.num_channels + ch_idx]
-                    scan_values.append(value)
-                    
-                    # Add to plot buffer
-                    self.plot_buffers[ch_idx].append(value)
-                
-                # Write to file
-                line = f"{timestamp}," + ",".join(map(str, scan_values)) + "\n"
-                self.file_handle.write(line)
+                    if i + ch_idx < len(data):
+                        self.plot_buffers[ch_idx].append(data[i + ch_idx])
             
-            # Update plots
-            self.update_plots()
+            # Update performance stats periodically
+            now = datetime.now()
+            if (now - self.last_perf_update).total_seconds() >= 1.0:
+                elapsed = (now - self.last_perf_update).total_seconds()
+                sample_rate = self.samples_received / elapsed
+                
+                # Calculate file size
+                file_size_mb = self.total_samples_written * self.num_channels * 8 / (1024 * 1024)
+                
+                self.status_label.setText(
+                    f"Streaming: {sample_rate:.0f} samples/s | "
+                    f"Total: {self.total_samples_written:,} scans | "
+                    f"File: {file_size_mb:.1f} MB"
+                )
+                
+                self.samples_received = 0
+                self.last_perf_update = now
             
         except ljm.LJMError as e:
             if e.errorCode == ljm.errorcodes.NO_SCANS_RETURNED:
@@ -139,13 +202,15 @@ class LabJackStreamer(QMainWindow):
                 pass
             else:
                 print(f"Stream error: {e}")
+                self.status_label.setText(f"Stream error: {e}")
                 self.stop_streaming()
         except Exception as e:
             print(f"Error reading stream: {e}")
+            self.status_label.setText(f"Error: {e}")
             self.stop_streaming()
     
     def update_plots(self):
-        """Update the plot curves with current buffer data"""
+        """Update the plot curves with current buffer data (called less frequently)"""
         for i, curve in enumerate(self.curves):
             if len(self.plot_buffers[i]) > 0:
                 curve.setData(list(self.plot_buffers[i]))
@@ -153,16 +218,32 @@ class LabJackStreamer(QMainWindow):
     def stop_streaming(self):
         """Stop the stream and cleanup"""
         self.read_timer.stop()
+        self.plot_timer.stop()
+        
+        # Write final metadata
+        if self.metadata_file is not None:
+            end_time = datetime.now()
+            duration = (end_time - self.start_time).total_seconds() if self.start_time else 0
+            
+            final_metadata = f"""
+End Time: {end_time.isoformat()}
+Duration: {duration:.2f} seconds
+Total Scans: {self.total_samples_written}
+Actual Sample Rate: {self.total_samples_written / duration:.2f} Hz
+"""
+            self.metadata_file.write(final_metadata)
+        
         self.cleanup_stream()
         
         # Update button states
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         
+        self.status_label.setText(f"Stopped. Wrote {self.total_samples_written:,} scans.")
         print("Stream stopped")
     
     def cleanup_stream(self):
-        """Cleanup LabJack connection and file"""
+        """Cleanup LabJack connection and files"""
         try:
             if self.handle is not None:
                 ljm.eStreamStop(self.handle)
@@ -171,35 +252,64 @@ class LabJackStreamer(QMainWindow):
         except:
             pass
         
-        if self.file_handle is not None:
-            self.file_handle.close()
-            self.file_handle = None
+        if self.binary_file is not None:
+            self.binary_file.close()
+            self.binary_file = None
+            
+        if self.metadata_file is not None:
+            self.metadata_file.close()
+            self.metadata_file = None
     
     def closeEvent(self, event):
         """Handle window close event"""
         self.stop_streaming()
         event.accept()
 
+
+def read_binary_data(filename, num_channels):
+    """
+    Utility function to read back the binary data file.
+    
+    Args:
+        filename: Path to the .bin file
+        num_channels: Number of channels in the recording
+    
+    Returns:
+        numpy array of shape (num_scans, num_channels)
+    """
+    # Read all data
+    data = np.fromfile(filename, dtype=np.float64)
+    
+    # Reshape to (num_scans, num_channels)
+    num_scans = len(data) // num_channels
+    data = data[:num_scans * num_channels]  # Trim any partial scan
+    data = data.reshape((num_scans, num_channels))
+    
+    return data
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = LabJackStreamer()
     window.show()
+    
+    # Example of how to read the data back:
+    print("\n" + "="*60)
+    print("To read back your data later, use:")
+    print("="*60)
+    print("""
+import numpy as np
+
+def read_binary_data(filename, num_channels):
+    data = np.fromfile(filename, dtype=np.float64)
+    num_scans = len(data) // num_channels
+    data = data[:num_scans * num_channels]
+    return data.reshape((num_scans, num_channels))
+
+# Usage:
+data = read_binary_data('labjack_data_20241106_123456.bin', num_channels=2)
+# data is now a numpy array of shape (num_scans, 2)
+# data[:, 0] is channel 0, data[:, 1] is channel 1
+    """)
+    
     sys.exit(app.exec())
-
-"""
-## Key Implementation Details
-
-### 1. **Timer-Based Reading**
-- `QTimer` fires every `read_interval` ms (e.g., 100 ms)
-- Each timeout calls `read_stream_data()` which uses `ljm.eStreamRead()` to grab accumulated samples from the LabJack's internal buffer
-
-### 2. **Circular Buffer for Plotting**
-- Using `collections.deque` with `maxlen` creates an automatic circular buffer
-- Old data automatically drops off as new data arrives
-- Efficient for maintaining a fixed-size rolling window
-
-### 3. **Data Flow**
-```
-LabJack Hardware → LJM Buffer → eStreamRead() → Process & Save → Plot Buffer → Display
-
-"""
