@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
     QLabel
 )
 import pyqtgraph as pg
-from settingsDialog import *
 from dataModels import *
  
 """ 
@@ -33,14 +32,7 @@ Main TODO / bugs:
 
 """
 
-# Could set up to instead get names from files themselves
-# But premature optimization = root of all evil
-muscleNames = ['lax','lba','lsa','ldvm','ldlm','rdlm','rdvm','rsa','rba','rax']
 filtEnableColor = '#73A843'
-highlightColor = '#EEEEEE'
-muscleColors = [
-    "#94D63C", "#AE3FC3", "#FFBE24", "#66AFE6", "#E87D7A",
-    "#C14434", "#2A4A78", "#E7AC1E", "#7D2D8C", "#6A992A"]
 unitColors = [
     '#ffffff', '#ebac23', 
     '#b80058', '#008cf9',
@@ -269,45 +261,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Get paths, core variables from QSettings, use to populate app
         self._path_data, self._path_amps = self.settings.value('last_paths', [], str)
         self.initializeDataDir()
-        
-    def onSettingsClick(self):
-        self.settingsDialog.exec()
-        self.setSettingsCache()
-    
-    def setSettingsCache(self):
-        self.settingsCache = {
-            'waveformLength' : int(self.settings.value('waveformLength', '32')),
-            'alignAt' : self.settings.value('alignAt', 'local maxima'),
-            'deadTime' : int(self.settings.value('deadTime', '10')),
-            'fractionPreAlign' : float(self.settings.value('fractionPreAlign', '0.4'))
-        }
-        setLength = int(self.settings.value('waveformLength', '32'))
-        # If waveformLength in cache is equivalent to what was set, do nothing
-        if not hasattr(self.spikeDataModel, '_spikes'):
-            return
-        if self.spikeDataModel._spikes[0][0].shape[1] == (5 + setLength):
-            return
-        cachedLength = self.spikeDataModel._spikes[0][0].shape[1] - 5
-        # If waveformLength in cache was larger than what was set, reshape _spikes to make it smaller
-        if self.spikeDataModel._spikes[0][0].shape[1] > (5 + setLength):
-            change = cachedLength - setLength
-            changeLeft = int(np.rint(change * self.settingsCache["fractionPreAlign"]))
-            changeRight = int(change - changeLeft)
-            for trialIndex, trial in enumerate(self.spikeDataModel._spikes):
-                for muscleIndex, muscle in enumerate(trial):
-                    holdArray = muscle[:, 0:5]
-                    modifyArray = muscle[:, 5:]
-                    modifyArray = modifyArray[:, changeLeft:-changeRight]
-                    self.spikeDataModel._spikes[trialIndex][muscleIndex] = np.hstack((holdArray, modifyArray))
-            return
-        # If waveformLength in cache was smaller than what was set, reshape _spikes to make it bigger
-        elif self.spikeDataModel._spikes[0][0].shape[1] < 5 + setLength:
-            for trialIndex, trial in enumerate(self.spikeDataModel._spikes):
-                for muscleIndex, muscle in enumerate(trial):
-                    newArray = np.zeros((muscle.shape[0], 5 + setLength))
-                    newArray[:, 0:5 + cachedLength] = muscle
-                    self.spikeDataModel._spikes[trialIndex][muscleIndex] = newArray
-            return
 
     
     def initializeDataDir(self):
@@ -460,10 +413,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.settings.setValue('last_paths', [self._path_data, self._path_amps])
         self.settings.sync()
         self.save()
-
-def mouseDragEvent(ev):
-    ev.accept()  # accept all buttons
-    dif = (ev.pos() - ev.lastPos()) * -1
 
 app = QtWidgets.QApplication([])
 window = MainWindow()
