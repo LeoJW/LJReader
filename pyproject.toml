@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "labjack-ljm>=1.23.0",
+    "matplotlib>=3.10.7",
     "numpy>=2.3.4",
     "pyqt6>=6.10.0",
     "pyqtgraph>=0.13.7",
+    "pyreadline3>=3.5.4",
     "scipy>=1.16.3",
 ]

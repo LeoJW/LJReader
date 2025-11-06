@@ -22,9 +22,9 @@ class LabJackStreamer(QMainWindow):
         
         # LabJack configuration
         self.handle = None
-        self.scan_rate = 10000  # Hz (10 kHz - 30 kHz)
+        self.scan_rate = 30000  # Hz (10 kHz - 30 kHz)
         self.num_channels = 2
-        self.channels = ["AIN0", "AIN1"]
+        self.channels = ["AIN" + str(i) for i in range(self.num_channels)]
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
         
         # Buffer configuration
@@ -95,8 +95,8 @@ class LabJackStreamer(QMainWindow):
             
             # Create binary file for data storage
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            binary_filename = f"labjack_data_{timestamp}.bin"
-            metadata_filename = f"labjack_data_{timestamp}.meta"
+            binary_filename = f"{timestamp}.bin"
+            metadata_filename = f"{timestamp}.meta"
             
             self.binary_file = open(binary_filename, 'wb')
             self.metadata_file = open(metadata_filename, 'w')
@@ -113,11 +113,16 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
 """
             self.metadata_file.write(metadata)
             self.metadata_file.flush()
+
+            # Configure DAQ a little
+            # Ensure triggered stream is disabled.
+            ljm.eWriteName(self.handle, "STREAM_TRIGGER_INDEX", 0)
+            # Enabling internally-clocked stream.
+            ljm.eWriteName(self.handle, "STREAM_CLOCK_SOURCE", 0)
+            ljm.eWriteNames(self.handle, 1, "LJM_STREAM_AIN_BINARY", 1)
             
             # Configure and start stream
             scans_per_read = int(self.scan_rate * self.read_interval / 1000)
-            
-            # Ensure scans_per_read is reasonable
             scans_per_read = max(scans_per_read, 1)
             
             ljm.eStreamStart(
@@ -293,23 +298,23 @@ if __name__ == '__main__':
     window = LabJackStreamer()
     window.show()
     
-    # Example of how to read the data back:
-    print("\n" + "="*60)
-    print("To read back your data later, use:")
-    print("="*60)
-    print("""
-import numpy as np
+#     # Example of how to read the data back:
+#     print("\n" + "="*60)
+#     print("To read back your data later, use:")
+#     print("="*60)
+#     print("""
+# import numpy as np
 
-def read_binary_data(filename, num_channels):
-    data = np.fromfile(filename, dtype=np.float64)
-    num_scans = len(data) // num_channels
-    data = data[:num_scans * num_channels]
-    return data.reshape((num_scans, num_channels))
+# def read_binary_data(filename, num_channels):
+#     data = np.fromfile(filename, dtype=np.float64)
+#     num_scans = len(data) // num_channels
+#     data = data[:num_scans * num_channels]
+#     return data.reshape((num_scans, num_channels))
 
-# Usage:
-data = read_binary_data('labjack_data_20241106_123456.bin', num_channels=2)
-# data is now a numpy array of shape (num_scans, 2)
-# data[:, 0] is channel 0, data[:, 1] is channel 1
-    """)
+# # Usage:
+# data = read_binary_data('labjack_data_20241106_123456.bin', num_channels=2)
+# # data is now a numpy array of shape (num_scans, 2)
+# # data[:, 0] is channel 0, data[:, 1] is channel 1
+#     """)
     
     sys.exit(app.exec())
