@@ -4,12 +4,9 @@ import json
 import datetime
 import os
 import re
-import scipy.io
-import h5py
 from labjack import ljm
-from mainwindow_ui import Ui_MainWindow
 import numpy as np
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtWidgets, uic
 from PyQt6.QtGui import (
     QAction, 
     QKeySequence, 
@@ -45,6 +42,11 @@ invalidColor = QColor(120,120,120,200)
 unitKeys = ['0','1','2','3','4','5','6','7','8','9']
 statusBarDisplayTime = 3000 # ms
 
+# Will eventually have to switch to storing mainwindow as mainwindow.py, importing from that
+# For now using older system as changes are made
+qt_creator_file = "mainwindow.ui"
+Ui_MainWindow, QtBaseClass = uic.loadUiType(qt_creator_file)
+
 class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def __init__(self):
         QtWidgets.QMainWindow.__init__(self)
@@ -55,7 +57,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._path_amps = os.path.dirname(os.path.abspath(__file__))
         
         # Traces plot (default run, uses default muscle names and colors)
-        self.muscleColorsDict = {muscleNames[i] : muscleColors[i] for i in range(len(muscleNames))}
         self._activeIndex = 0
         self.traces = []
         self.setNewTraces()
@@ -87,8 +88,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         
         #--- Settings dialog, main app settings
         self.settings = QtCore.QSettings('DickersonLab', 'LJReader')
-        self.settingsDialog = SettingsDialog(self)
-        self.setSettingsCache()
         
         #--- Keyboard shortcuts
         self.shortcutDict = {
