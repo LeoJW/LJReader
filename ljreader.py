@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPu
 from PyQt6.QtCore import QTimer
 from labjack import ljm
 import pyqtgraph as pg
-from collections import deque
 from datetime import datetime
 
 traceColors = [
@@ -14,7 +13,7 @@ traceColors = [
     '#d163e6', '#b24502',
     '#ff9287', '#5954d6',
     '#00c6f8', '#878500'
-] # 12 color palette from http://tsitsul.in/blog/coloropt/
+]
 
 class LabJackStreamer(QMainWindow):
     def __init__(self):
@@ -22,7 +21,7 @@ class LabJackStreamer(QMainWindow):
         
         # LabJack configuration
         self.handle = None
-        self.scan_rate = 30000  # Hz (10 kHz - 30 kHz)
+        self.scan_rate = 30000  # Hz
         self.num_channels = 2
         self.channels = ["AIN" + str(i) for i in range(self.num_channels)]
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
@@ -30,17 +29,21 @@ class LabJackStreamer(QMainWindow):
         # Buffer configuration
         self.plot_buffer_size = 5000  # points to display per channel
         self.read_interval = 50  # ms - read from stream every 50ms
-        self.plot_update_interval = 100  # ms - update plot less frequently
-        self.plot_downsample = 4  # Plot every Nth point for performance
+        self.plot_update_interval = 200  # ms - INCREASED for better performance
+        self.plot_downsample = 10  # INCREASED - plot every 10th point
         
-        # Data storage
-        self.plot_buffers = [deque(maxlen=self.plot_buffer_size) for _ in range(self.num_channels)]
+        # Use numpy arrays instead of deques for better performance
+        self.plot_buffers = [np.zeros(self.plot_buffer_size, dtype=np.float32) 
+                            for _ in range(self.num_channels)]
+        self.buffer_indices = [0] * self.num_channels  # Track write position
+        self.buffer_full = [False] * self.num_channels  # Track if buffer has wrapped
+        
         self.binary_file = None
         self.metadata_file = None
         self.total_samples_written = 0
         self.start_time = None
         
-        # Separate timer for plot updates
+        # Separate timers
         self.read_timer = QTimer()
         self.read_timer.timeout.connect(self.read_stream_data)
         
@@ -50,6 +53,9 @@ class LabJackStreamer(QMainWindow):
         # Performance tracking
         self.samples_received = 0
         self.last_perf_update = None
+        
+        # Plot data cache to avoid creating new arrays every update
+        self.x_data = np.arange(self.plot_buffer_size)
         
         self.init_ui()
         
@@ -64,16 +70,26 @@ class LabJackStreamer(QMainWindow):
         self.status_label = QLabel("Ready")
         layout.addWidget(self.status_label)
         
-        # Create plot widget
+        # Create plot widget with optimizations
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', 'Voltage', 'V')
         self.plot_widget.setLabel('bottom', 'Sample', '#')
         self.plot_widget.addLegend()
         
+        # Disable auto-range for better performance
+        self.plot_widget.enableAutoRange(False)
+        self.plot_widget.setRange(xRange=[0, self.plot_buffer_size], yRange=[-10, 10])
+        
+        # Reduce antialiasing for performance
+        self.plot_widget.setAntialiasing(False)
+        
         # Create plot curves for each channel
         self.curves = []
         for i, ch in enumerate(self.channels):
-            curve = self.plot_widget.plot(pen=traceColors[i % len(traceColors)], name=ch)
+            curve = self.plot_widget.plot(
+                pen=pg.mkPen(color=traceColors[i % len(traceColors)], width=1),
+                name=ch
+            )
             self.curves.append(curve)
         
         layout.addWidget(self.plot_widget)
@@ -108,18 +124,15 @@ Start Time: {self.start_time.isoformat()}
 Sample Rate: {self.scan_rate} Hz
 Number of Channels: {self.num_channels}
 Channels: {', '.join(self.channels)}
-Data Format: Binary float64 (8 bytes per value)
+Data Format: Binary float32 (4 bytes per value)
 Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ...]
 """
             self.metadata_file.write(metadata)
             self.metadata_file.flush()
 
-            # Configure DAQ a little
-            # Ensure triggered stream is disabled.
+            # Configure DAQ
             ljm.eWriteName(self.handle, "STREAM_TRIGGER_INDEX", 0)
-            # Enabling internally-clocked stream.
             ljm.eWriteName(self.handle, "STREAM_CLOCK_SOURCE", 0)
-            # ljm.eWriteNames(self.handle, 1, "LJM_STREAM_AIN_BINARY", 1) # Need this to work but it doesn't seem to
             ljm.writeLibraryConfigS(ljm.constants.STREAM_AIN_BINARY, 1)
             
             # Configure and start stream
@@ -138,10 +151,12 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             print(f"Reading {scans_per_read} scans every {self.read_interval} ms")
             print(f"Binary file: {binary_filename}")
             
-            # Reset counters
+            # Reset counters and buffers
             self.total_samples_written = 0
             self.samples_received = 0
             self.last_perf_update = datetime.now()
+            self.buffer_indices = [0] * self.num_channels
+            self.buffer_full = [False] * self.num_channels
             
             # Start the timers
             self.read_timer.start(self.read_interval)
@@ -168,9 +183,8 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             if len(data) == 0:
                 return
             
-            # Convert to numpy array and write directly to binary file
-            # Data is already interleaved: [ch0, ch1, ch0, ch1, ...]
             data_array = np.array(data, dtype=np.float32)
+            # Write directly to binary file
             data_array.tofile(self.binary_file)
             
             # Track samples
@@ -178,11 +192,31 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             self.total_samples_written += num_samples
             self.samples_received += num_samples
             
-            # Add to plot buffers (downsample for efficiency)
-            for i in range(0, len(data), self.num_channels * self.plot_downsample):
-                for ch_idx in range(self.num_channels):
-                    if i + ch_idx < len(data):
-                        self.plot_buffers[ch_idx].append(data[i + ch_idx])
+            # Update plot buffers
+            # Downsample and separate channels
+            for ch_idx in range(self.num_channels):
+                # Extract channel data with downsampling
+                ch_data = data_array[ch_idx::self.num_channels * self.plot_downsample]
+                
+                if len(ch_data) > 0:
+                    # Efficiently update circular buffer
+                    buf_idx = self.buffer_indices[ch_idx]
+                    buf_size = self.plot_buffer_size
+                    
+                    # How many samples can we write before wrapping?
+                    space_to_end = buf_size - buf_idx
+                    
+                    if len(ch_data) <= space_to_end:
+                        # All data fits before wrap
+                        self.plot_buffers[ch_idx][buf_idx:buf_idx + len(ch_data)] = ch_data
+                        self.buffer_indices[ch_idx] = (buf_idx + len(ch_data)) % buf_size
+                    else:
+                        # Need to wrap
+                        self.plot_buffers[ch_idx][buf_idx:] = ch_data[:space_to_end]
+                        remainder = len(ch_data) - space_to_end
+                        self.plot_buffers[ch_idx][:remainder] = ch_data[space_to_end:]
+                        self.buffer_indices[ch_idx] = remainder
+                        self.buffer_full[ch_idx] = True
             
             # Update performance stats periodically
             now = datetime.now()
@@ -191,7 +225,7 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
                 sample_rate = self.samples_received / elapsed
                 
                 # Calculate file size
-                file_size_mb = self.total_samples_written * self.num_channels * 8 / (1024 ** 2)
+                file_size_mb = self.total_samples_written * self.num_channels * 4 / (1024 ** 2)
                 
                 self.status_label.setText(
                     f"Streaming: {sample_rate:.0f} samples/s | "
@@ -204,8 +238,7 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             
         except ljm.LJMError as e:
             if e.errorCode == ljm.errorcodes.NO_SCANS_RETURNED:
-                # No data available yet, this is normal
-                pass
+                pass  # No data available yet, this is normal
             else:
                 print(f"Stream error: {e}")
                 self.status_label.setText(f"Stream error: {e}")
@@ -216,10 +249,19 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             self.stop_streaming()
     
     def update_plots(self):
-        """Update the plot curves with current buffer data (called less frequently)"""
+        """Update the plot curves with current buffer data"""
         for i, curve in enumerate(self.curves):
-            if len(self.plot_buffers[i]) > 0:
-                curve.setData(self.plot_buffers[i])
+            # Only update if we have data
+            if self.buffer_indices[i] > 0 or self.buffer_full[i]:
+                if self.buffer_full[i]:
+                    # Buffer has wrapped - reorder to show continuous data
+                    idx = self.buffer_indices[i]
+                    # Roll the data so newest is at the end
+                    display_data = np.roll(self.plot_buffers[i], -idx)
+                    curve.setData(display_data)
+                else:
+                    # Buffer not yet full - just show what we have
+                    curve.setData(self.plot_buffers[i][:self.buffer_indices[i]])
     
     def stop_streaming(self):
         """Stop the stream and cleanup"""
@@ -283,8 +325,8 @@ def read_binary_data(filename, num_channels):
     Returns:
         numpy array of shape (num_scans, num_channels)
     """
-    # Read all data
-    data = np.fromfile(filename, dtype=np.float64)
+    # Read all data (note: changed to float32 to match new format)
+    data = np.fromfile(filename, dtype=np.float32)
     
     # Reshape to (num_scans, num_channels)
     num_scans = len(data) // num_channels
