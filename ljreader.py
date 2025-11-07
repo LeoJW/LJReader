@@ -119,7 +119,8 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             ljm.eWriteName(self.handle, "STREAM_TRIGGER_INDEX", 0)
             # Enabling internally-clocked stream.
             ljm.eWriteName(self.handle, "STREAM_CLOCK_SOURCE", 0)
-            ljm.eWriteNames(self.handle, 1, "LJM_STREAM_AIN_BINARY", 1)
+            # ljm.eWriteNames(self.handle, 1, "LJM_STREAM_AIN_BINARY", 1) # Need this to work but it doesn't seem to
+            ljm.writeLibraryConfigS(ljm.constants.STREAM_AIN_BINARY, 1)
             
             # Configure and start stream
             scans_per_read = int(self.scan_rate * self.read_interval / 1000)
@@ -218,7 +219,7 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
         """Update the plot curves with current buffer data (called less frequently)"""
         for i, curve in enumerate(self.curves):
             if len(self.plot_buffers[i]) > 0:
-                curve.setData(list(self.plot_buffers[i]))
+                curve.setData(self.plot_buffers[i])
     
     def stop_streaming(self):
         """Stop the stream and cleanup"""
