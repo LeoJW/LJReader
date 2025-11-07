@@ -22,15 +22,15 @@ class LabJackStreamer(QMainWindow):
         # LabJack configuration
         self.handle = None
         self.scan_rate = 30000  # Hz
-        self.num_channels = 2
+        self.num_channels = 4
         self.channels = ["AIN" + str(i) for i in range(self.num_channels)]
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
         
         # Buffer configuration
-        self.plot_buffer_size = 5000  # points to display per channel
-        self.read_interval = 50  # ms - read from stream every 50ms
-        self.plot_update_interval = 200  # ms - INCREASED for better performance
-        self.plot_downsample = 10  # INCREASED - plot every 10th point
+        self.plot_buffer_size = 1000  # points to display per channel
+        self.read_interval = 100  # ms - read from stream every x ms
+        self.plot_update_interval = 500  # ms - Increase for better performance
+        self.plot_downsample = 4  # Increase for better performance, plot every nth point
         
         # Use numpy arrays instead of deques for better performance
         self.plot_buffers = [np.zeros(self.plot_buffer_size, dtype=np.float32) 
@@ -91,7 +91,6 @@ class LabJackStreamer(QMainWindow):
                 name=ch
             )
             self.curves.append(curve)
-        
         layout.addWidget(self.plot_widget)
         
         # Control buttons
@@ -131,9 +130,12 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             self.metadata_file.flush()
 
             # Configure DAQ
-            ljm.eWriteName(self.handle, "STREAM_TRIGGER_INDEX", 0)
-            ljm.eWriteName(self.handle, "STREAM_CLOCK_SOURCE", 0)
-            ljm.writeLibraryConfigS(ljm.constants.STREAM_AIN_BINARY, 1)
+            # Resolution index can be set up to 4 when sampling 4 channels at 30kHz. 
+            # Setting to zero auto-selects best available resolution
+            configNames = ["STREAM_RESOLUTION_INDEX", "STREAM_TRIGGER_INDEX", "STREAM_CLOCK_SOURCE"]
+            configValues = [0, 0, 0]
+            ljm.eWriteNames(self.handle, len(configNames), configNames, configValues)
+            # ljm.writeLibraryConfigS(ljm.constants.STREAM_AIN_BINARY, 1)
             
             # Configure and start stream
             scans_per_read = int(self.scan_rate * self.read_interval / 1000)
@@ -221,16 +223,14 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             # Update performance stats periodically
             now = datetime.now()
             if (now - self.last_perf_update).total_seconds() >= 1.0:
-                elapsed = (now - self.last_perf_update).total_seconds()
-                sample_rate = self.samples_received / elapsed
-                
                 # Calculate file size
                 file_size_mb = self.total_samples_written * self.num_channels * 4 / (1024 ** 2)
                 
                 self.status_label.setText(
-                    f"Streaming: {sample_rate:.0f} samples/s | "
                     f"Total: {self.total_samples_written:,} scans | "
-                    f"File: {file_size_mb:.1f} MB"
+                    f"File: {file_size_mb:.1f} MB | "
+                    f"Device backlog: {ret[1]} samples | "
+                    f"LJM backlog: {ret[2]} samples | "
                 )
                 
                 self.samples_received = 0
@@ -265,6 +265,7 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
     
     def stop_streaming(self):
         """Stop the stream and cleanup"""
+        # TODO: Keep running read_timer until LJM buffer is empty
         self.read_timer.stop()
         self.plot_timer.stop()
         
@@ -277,7 +278,6 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
 End Time: {end_time.isoformat()}
 Duration: {duration:.2f} seconds
 Total Scans: {self.total_samples_written}
-Actual Sample Rate: {self.total_samples_written / duration:.2f} Hz
 """
             self.metadata_file.write(final_metadata)
         
