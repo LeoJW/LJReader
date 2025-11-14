@@ -27,10 +27,10 @@ class LabJackStreamer(QMainWindow):
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
         
         # Buffer configuration
-        self.plot_buffer_size = 1000  # points to display per channel
+        self.plot_buffer_size = 10000  # points to display per channel
         self.read_interval = 100  # ms - read from stream every x ms
         self.plot_update_interval = 500  # ms - Increase for better performance
-        self.plot_downsample = 4  # Increase for better performance, plot every nth point
+        self.plot_downsample = 2  # Increase for better performance, plot every nth point
         
         # Use numpy arrays instead of deques for better performance
         self.plot_buffers = [np.zeros(self.plot_buffer_size, dtype=np.float32) 
