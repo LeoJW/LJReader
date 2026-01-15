@@ -21,16 +21,16 @@ class LabJackStreamer(QMainWindow):
         
         # LabJack configuration
         self.handle = None
-        self.scan_rate = 30000  # Hz
+        self.scan_rate = 40000  # Hz
         self.num_channels = 4
         self.channels = ["AIN" + str(i) for i in range(self.num_channels)]
         self.channel_addresses = [ljm.nameToAddress(ch)[0] for ch in self.channels]
         
         # Buffer configuration
         self.plot_buffer_size = 10000  # points to display per channel
-        self.read_interval = 100  # ms - read from stream every x ms
-        self.plot_update_interval = 500  # ms - Increase for better performance
-        self.plot_downsample = 2  # Increase for better performance, plot every nth point
+        self.read_interval = 2  # ms - read from stream every x ms
+        self.plot_update_interval = 250  # ms - Increase for better performance
+        self.plot_downsample = 4  # Increase for better performance, plot every nth point
         
         # Use numpy arrays instead of deques for better performance
         self.plot_buffers = [np.zeros(self.plot_buffer_size, dtype=np.float32) 
@@ -185,8 +185,8 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
             if len(data) == 0:
                 return
             
-            data_array = np.array(data, dtype=np.float32)
             # Write directly to binary file
+            data_array = np.array(data, dtype=np.float32)
             data_array.tofile(self.binary_file)
             
             # Track samples
@@ -228,6 +228,7 @@ Data Layout: Interleaved [ch0_sample0, ch1_sample0, ch0_sample1, ch1_sample1, ..
                 
                 self.status_label.setText(
                     f"Total: {self.total_samples_written:,} scans | "
+                    f" {self.total_samples_written/self.scan_rate:,} seconds |"
                     f"File: {file_size_mb:.1f} MB | "
                     f"Device backlog: {ret[1]} samples | "
                     f"LJM backlog: {ret[2]} samples | "
